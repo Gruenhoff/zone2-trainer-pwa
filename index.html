@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <meta name="theme-color" content="#0a0f1e">
+    <meta name="description" content="Zone2 Trainer – HR-gesteuertes Radtraining mit Polar H10 und Van Rysel D100">
+
+    <title>Zone2 Trainer</title>
+
+    <link rel="manifest" href="manifest.json">
+    <link rel="stylesheet" href="css/style.css">
+    <link rel="icon" type="image/svg+xml" href="icons/icon.svg">
+
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+</head>
+<body>
+<div id="app">
+
+    <!-- ══════════════════════════════════════════════
+         HEADER
+         ══════════════════════════════════════════════ -->
+    <header class="app-header">
+
+        <div class="header-left">
+            <span class="app-title">Zone2 Trainer</span>
+        </div>
+
+        <div class="header-center">
+            <div class="conn-badge disconnected" id="status-h10" title="Polar H10 verbinden">
+                <span class="dot"></span><span class="device-name">H10</span>
+            </div>
+            <div class="conn-badge disconnected" id="status-pm" title="Powermeter verbinden">
+                <span class="dot"></span><span class="device-name">Powermeter</span>
+            </div>
+            <div class="conn-badge disconnected" id="status-d100" title="D100 verbinden">
+                <span class="dot"></span><span class="device-name">D100</span>
+            </div>
+        </div>
+
+        <nav class="header-tabs">
+            <button class="tab-btn active" data-tab="dashboard">Dashboard</button>
+            <button class="tab-btn" data-tab="history">Verlauf</button>
+        </nav>
+
+    </header>
+
+    <!-- ══════════════════════════════════════════════
+         DASHBOARD
+         ══════════════════════════════════════════════ -->
+    <div id="view-dashboard" class="tab-view">
+
+        <!-- Verbinden-Leiste -->
+        <div class="connect-bar">
+            <button id="btn-connect-h10"  class="btn btn-connect">H10 verbinden</button>
+            <button id="btn-connect-pm"   class="btn btn-connect">Powermeter verbinden</button>
+            <button id="btn-connect-d100" class="btn btn-connect">D100 verbinden</button>
+            <div id="error-banner" class="error-banner hidden"></div>
+        </div>
+
+        <!-- Session-Summary -->
+        <div id="session-summary" class="session-summary hidden"></div>
+
+        <!-- Block-Indikator + Timer -->
+        <div class="phase-bar">
+            <div class="block-steps">
+                <div class="block-step warmup"   id="block-warmup">Aufwarmen</div>
+                <div class="block-step work"     id="block-work">Arbeitsblock</div>
+                <div class="block-step cooldown" id="block-cooldown">Abkuhlen</div>
+            </div>
+            <div class="phase-timer-wrap">
+                <span class="phase-label" id="phase-label"></span>
+                <span class="phase-timer" id="phase-timer">--:--</span>
+            </div>
+        </div>
+
+        <!-- Zweispalten-Hauptbereich -->
+        <div class="dashboard-grid">
+
+            <!-- ── Linke Spalte: HR + Chart ── -->
+            <div class="col-left">
+
+                <div class="card hr-card">
+                    <div class="card-label">Herzfrequenz</div>
+                    <div class="hr-display">
+                        <span class="hr-value" id="hr-value">--</span>
+                        <span class="hr-unit">bpm</span>
+                    </div>
+                </div>
+
+                <div class="card chart-card">
+                    <div class="card-label">Herzfrequenz – letzte 10 Minuten</div>
+                    <div class="chart-wrap">
+                        <canvas id="hr-chart"></canvas>
+                    </div>
+                </div>
+
+            </div>
+
+            <!-- ── Rechte Spalte: Watt + Steuerung ── -->
+            <div class="col-right">
+
+                <!-- Watt-Anzeige -->
+                <div class="card">
+                    <div class="watts-grid">
+                        <div class="watts-block">
+                            <div class="card-label">Aktuell</div>
+                            <div class="watts-value"><span id="current-watts">--</span><span class="unit"> W</span></div>
+                        </div>
+                        <div class="watts-divider"></div>
+                        <div class="watts-block">
+                            <div class="card-label">Ziel</div>
+                            <div class="watts-value target"><span id="target-watts-display">--</span><span class="unit"> W</span></div>
+                        </div>
+                        <div class="watts-divider"></div>
+                        <div class="watts-block">
+                            <div class="card-label">Ø HR</div>
+                            <div class="watts-value small"><span id="avg-hr">--</span><span class="unit"> bpm</span></div>
+                        </div>
+                        <div class="watts-block">
+                            <div class="card-label">Ø Watt</div>
+                            <div class="watts-value small"><span id="avg-watts">--</span><span class="unit"> W</span></div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- PwHR Drift -->
+                <div class="card drift-card" id="drift-section">
+                    <div class="drift-header">
+                        <div class="card-label">PwHR Drift</div>
+                        <div class="drift-value" id="drift-value">Warte auf Daten...</div>
+                    </div>
+                    <div class="drift-bar-track">
+                        <div class="drift-fill" id="drift-bar"></div>
+                    </div>
+                    <div class="drift-info" id="drift-info"></div>
+                </div>
+
+                <!-- HRV Status -->
+                <div class="card" id="hrv-section">
+                    <div class="card-label">HRV-Status heute</div>
+                    <div class="hrv-buttons">
+                        <button class="hrv-btn" id="hrv-green"  data-status="green">Grün</button>
+                        <button class="hrv-btn" id="hrv-yellow" data-status="yellow">Gelb</button>
+                        <button class="hrv-btn" id="hrv-red"    data-status="red">Rot</button>
+                    </div>
+                </div>
+
+                <!-- Einstellungen -->
+                <div class="card settings-card">
+                    <div class="card-label">Einstellungen</div>
+                    <div class="settings-row">
+                        <div class="settings-field">
+                            <label>Ziel-Watt</label>
+                            <input type="number" id="input-target-watts" min="30" max="500" step="5" value="120">
+                        </div>
+                        <div class="settings-field">
+                            <label>Reduktions-HR</label>
+                            <input type="number" id="input-reduction-hr" min="100" max="200" step="1" value="148">
+                        </div>
+                        <div class="settings-field">
+                            <label>Hysterese-Reset</label>
+                            <input type="number" id="input-hysteresis-reset" min="100" max="200" step="1" value="144">
+                        </div>
+                    </div>
+                    <label class="trend-label">
+                        <input type="checkbox" id="cb-trend" checked>
+                        Trend-Erkennung aktiv
+                    </label>
+                </div>
+
+                <!-- Steuerungs-Buttons -->
+                <div class="action-buttons">
+                    <button class="btn btn-start" id="btn-start">START</button>
+                    <button class="btn btn-watt"  id="btn-plus5">+5 W</button>
+                    <button class="btn btn-watt"  id="btn-plus10">+10 W</button>
+                    <button class="btn btn-stop"  id="btn-stop" disabled>STOP</button>
+                </div>
+
+            </div>
+        </div><!-- .dashboard-grid -->
+
+    </div><!-- #view-dashboard -->
+
+    <!-- ══════════════════════════════════════════════
+         VERLAUF
+         ══════════════════════════════════════════════ -->
+    <div id="view-history" class="tab-view hidden">
+        <div class="history-header">
+            <div class="history-title">Sessionverlauf</div>
+            <button class="btn-export" id="btn-export-csv">CSV exportieren</button>
+        </div>
+        <div class="history-table-wrap">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Datum</th>
+                        <th>HRV</th>
+                        <th>Arbeitsblock</th>
+                        <th>Ø HR</th>
+                        <th>Ø Watt</th>
+                        <th>Drift</th>
+                    </tr>
+                </thead>
+                <tbody id="history-tbody">
+                    <tr><td colspan="6" class="empty-row">Noch keine Sessions</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <!-- ══════════════════════════════════════════════
+         STATUSLEISTE
+         ══════════════════════════════════════════════ -->
+    <div class="status-bar">
+        <span class="last-event" id="last-event">Bereit – Sensoren verbinden, dann START drucken</span>
+        <span class="hrv-badge hrv-green" id="hrv-badge">HRV: Grün</span>
+    </div>
+
+</div><!-- #app -->
+
+<script type="module" src="js/app.js"></script>
+</body>
+</html>

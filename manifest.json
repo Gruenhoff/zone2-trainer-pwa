@@ -1,0 +1,20 @@
+{
+    "name": "Zone2 Trainer",
+    "short_name": "Zone2",
+    "description": "HR-gesteuertes Radtraining – Polar H10 + Van Rysel D100",
+    "start_url": "./",
+    "display": "standalone",
+    "background_color": "#0a0f1e",
+    "theme_color": "#0a0f1e",
+    "orientation": "portrait-primary",
+    "lang": "de",
+    "icons": [
+        {
+            "src": "icons/icon.svg",
+            "sizes": "any",
+            "type": "image/svg+xml",
+            "purpose": "any maskable"
+        }
+    ],
+    "categories": ["health", "fitness"]
+}
