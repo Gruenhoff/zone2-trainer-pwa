@@ -61,6 +61,13 @@ export class D100Bluetooth extends BleDevice {
         this.lastTargetSent = null;
         this.lastAckTime    = 0;
         this.hasControl     = false;
+        // Solange der Handschlag laeuft, duerfen Zwischenmeldungen des Trainers
+        // keinen Steuerungsverlust ausloesen - sonst rettet die App eine
+        // Verbindung, die gerade erst aufgebaut wird.
+        this._handshakeRunning = false;
+        // Merkt einen echten Steuerungsverlust, der waehrend des Handschlags
+        // eintrifft - sonst wuerde ihn die Schlusszuweisung wieder zudecken.
+        this._controlLostDuringHandshake = false;
 
         this._queue   = [];
         this._running = false;
@@ -140,33 +147,54 @@ export class D100Bluetooth extends BleDevice {
      */
     async takeControl() {
         this.hasControl = false;
+        this._handshakeRunning = true;
+        this._controlLostDuringHandshake = false;
 
-        for (let versuch = 1; versuch <= 3; versuch++) {
-            try {
-                await this._enqueue(new Uint8Array([OP_REQUEST_CONTROL]), OP_REQUEST_CONTROL,
-                                    { timeoutMs: HANDSHAKE_TIMEOUT_MS });
-                this.hasControl = true;
-                this._step(`${this.label}: Steuerung übernommen`, 'ok');
-                break;
-            } catch (err) {
-                this._step(`${this.label}: Steuerung anfordern, Versuch ${versuch} von 3 fehlgeschlagen (${err.message})`,
-                           versuch === 3 ? 'warn' : 'info');
-                if (versuch < 3) await new Promise((r) => setTimeout(r, 700));
+        // Bewusst eine lokale Variable: this.hasControl kann waehrend des
+        // Handschlags von aussen umgelegt werden - etwa wenn der Trainer
+        // Start/Resume mit "Steuerung nicht erlaubt" quittiert, weil er
+        // ohnehin schon laeuft. Das darf ein zuvor bestaetigtes
+        // "Steuerung anfordern" nicht entwerten.
+        let bestaetigt = false;
+
+        try {
+            for (let versuch = 1; versuch <= 3; versuch++) {
+                try {
+                    await this._enqueue(new Uint8Array([OP_REQUEST_CONTROL]), OP_REQUEST_CONTROL,
+                                        { timeoutMs: HANDSHAKE_TIMEOUT_MS });
+                    bestaetigt = true;
+                    this._step(`${this.label}: Steuerung übernommen`, 'ok');
+                    break;
+                } catch (err) {
+                    this._step(`${this.label}: Steuerung anfordern, Versuch ${versuch} von 3 fehlgeschlagen (${err.message})`,
+                               versuch === 3 ? 'warn' : 'info');
+                    if (versuch < 3) await new Promise((r) => setTimeout(r, 700));
+                }
             }
+
+            // Start/Resume ist nachrangig: viele Geräte antworten mit einem
+            // Fehler, wenn sie bereits laufen.
+            try {
+                await this._enqueue(new Uint8Array([OP_START_RESUME]), OP_START_RESUME,
+                                    { timeoutMs: HANDSHAKE_TIMEOUT_MS });
+                this._step(`${this.label}: Training gestartet`);
+            } catch (err) {
+                this._step(`${this.label}: Start/Resume abgelehnt (${err.message}) - unkritisch`);
+            }
+        } finally {
+            this._handshakeRunning = false;
         }
 
-        // Start/Resume ist ohnehin nachrangig: viele Geräte antworten mit
-        // einem Fehler, wenn sie bereits laufen.
-        try {
-            await this._enqueue(new Uint8Array([OP_START_RESUME]), OP_START_RESUME,
-                                { timeoutMs: HANDSHAKE_TIMEOUT_MS });
-        } catch { /* unkritisch */ }
+        // Ein waehrenddessen eingetroffener Reset wiegt schwerer als die
+        // Bestaetigung von vorhin.
+        if (this._controlLostDuringHandshake) bestaetigt = false;
+        this.hasControl = bestaetigt;
 
-        if (!this.hasControl) {
+        if (!bestaetigt) {
             this._error(`${this.label} bestätigt die Steuerung nicht. Watt-Vorgaben werden trotzdem gesendet - `
                       + 'falls der Trainer nicht reagiert, bitte andere Trainings-Apps schließen und den Trainer kurz vom Strom nehmen.');
         }
-        return this.hasControl;
+        return bestaetigt;
     }
 
     /**
@@ -297,9 +325,12 @@ export class D100Bluetooth extends BleDevice {
         if (resultCode === RESULT_SUCCESS) {
             this._pending.resolve();
         } else {
-            // 0x05 = Control Not Permitted: wir haben die Steuerung verloren
-            if (resultCode === 0x05) {
+            // 0x05 = Control Not Permitted. Waehrend des Handschlags ist das
+            // kein Steuerungsverlust, sondern haeufig nur die Antwort auf
+            // Start/Resume bei einem bereits laufenden Trainer.
+            if (resultCode === 0x05 && !this._handshakeRunning) {
                 this.hasControl = false;
+                this._step(`${this.label}: Steuerung entzogen (Opcode ${requestOpcode})`, 'warn');
                 if (this.onControlLost) this.onControlLost();
             }
             this._pending.reject(new Error(this._resultText(resultCode)));
@@ -357,13 +388,18 @@ export class D100Bluetooth extends BleDevice {
         this._markData();
         const opcode = data.getUint8(0);
 
-        // 0x02 = vom Nutzer gestoppt oder pausiert, 0x01 = Reset
-        if (opcode === 0x01 || opcode === 0x02) {
+        // Laut FTMS entzieht nur ein Reset (0x01) die Steuerung. "Gestoppt oder
+        // pausiert" (0x02) meldet ein Trainer voellig regulaer, solange niemand
+        // tritt - das als Steuerungsverlust zu werten hiesse, bei jeder
+        // Trinkpause eine intakte Verbindung zu "retten".
+        if (opcode === 0x01) {
             this.hasControl = false;
+            this._controlLostDuringHandshake = true;
+            this._step(`${this.label}: Trainer zurückgesetzt, Steuerung weg`, 'warn');
             if (this.onControlLost) this.onControlLost();
-            if (this.onMachineStatus) {
-                this.onMachineStatus(opcode === 0x01 ? 'Trainer zurückgesetzt' : 'Trainer gestoppt oder pausiert');
-            }
+            if (this.onMachineStatus) this.onMachineStatus('Trainer zurückgesetzt');
+        } else if (opcode === 0x02) {
+            this._step(`${this.label}: Trainer meldet gestoppt oder pausiert`);
         }
     }
 
