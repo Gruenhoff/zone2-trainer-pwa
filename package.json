@@ -1,0 +1,9 @@
+{
+  "name": "zone2-trainer-pwa",
+  "version": "1.0.0",
+  "description": "Zone2 Trainer PWA – HR-gesteuertes Radtraining mit Polar H10 und Van Rysel D100",
+  "scripts": {
+    "start": "npx http-server . -p 3002 -c-1 --cors"
+  },
+  "private": true
+}

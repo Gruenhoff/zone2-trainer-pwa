@@ -2,7 +2,7 @@
  * Service Worker – Zone2 Trainer PWA
  */
 
-const CACHE_NAME = 'zone2-trainer-v3';
+const CACHE_NAME = 'zone2-trainer-v4';
 const BASE = self.registration.scope;
 
 const STATIC_ASSETS = [

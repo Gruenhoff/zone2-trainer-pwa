@@ -158,8 +158,9 @@ class Zone2App {
         });
 
         // Session Buttons
-        this.$('btn-start').addEventListener('click', () => this._startSession());
-        this.$('btn-stop').addEventListener('click',  () => this._stopSession());
+        this.$('btn-start').addEventListener('click',    () => this._startSession());
+        this.$('btn-cooldown').addEventListener('click', () => this._triggerManualCooldown());
+        this.$('btn-stop').addEventListener('click',     () => this._stopSession());
 
         // Manuelle Watt-Erhöhung
         this.$('btn-plus5').addEventListener('click',  () => this._manualWattIncrease(5));
@@ -311,6 +312,18 @@ class Zone2App {
 
         this._mainLoop = setInterval(() => this._tick(), 1000);
         this._updateBlockIndicator();
+    }
+
+    _triggerManualCooldown() {
+        if (this.session.phase !== Phase.WORK) return;
+        const now = Date.now();
+        const coolWatts = this.session.triggerCooldown('manual', now);
+        if (coolWatts !== undefined) {
+            this.targetWatts = coolWatts;
+            this._sendTargetWatts();
+        }
+        this._setEvent('Manuell zu Abkühlen gewechselt');
+        this._onPhaseChanged(Phase.WORK, Phase.COOLDOWN, now);
     }
 
     _stopSession() {
@@ -603,6 +616,8 @@ class Zone2App {
             };
             labelEl.textContent = labels[phase] ?? '';
         }
+        const cooldownBtn = this.$('btn-cooldown');
+        if (cooldownBtn) cooldownBtn.disabled = (phase !== Phase.WORK);
     }
 
     _isPhaseDone(phaseId, currentPhase) {

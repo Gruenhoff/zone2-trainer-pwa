@@ -738,3 +738,118 @@ tbody td {
 .hrv-dot.hrv-green  { background: var(--green); }
 .hrv-dot.hrv-yellow { background: var(--yellow); }
 .hrv-dot.hrv-red    { background: var(--red); }
+
+/* ═══════════════════════════════════════════════════════════
+   ABKÜHLEN-BUTTON
+   ═══════════════════════════════════════════════════════════ */
+
+.btn-cooldown {
+    background: var(--yellow-dim);
+    border: 1.5px solid rgba(245, 158, 11, 0.4);
+    color: var(--yellow);
+}
+.btn-cooldown:not(:disabled):hover {
+    background: var(--yellow);
+    border-color: var(--yellow);
+    color: #000;
+}
+
+/* ═══════════════════════════════════════════════════════════
+   RESPONSIVE – Smartphone (Portrait)
+   ═══════════════════════════════════════════════════════════ */
+
+@media (max-width: 768px) {
+
+    html { font-size: 14px; }
+
+    /* Scrollen erlauben */
+    body { overflow: auto; }
+    #app { height: auto; min-height: 100dvh; }
+
+    /* Header: 2 Zeilen */
+    .app-header {
+        grid-template-columns: 1fr auto;
+        grid-template-rows: auto auto;
+        height: auto;
+        padding: 8px 12px;
+        gap: 6px 10px;
+    }
+    .header-left   { grid-column: 1; grid-row: 1; }
+    .header-tabs   { grid-column: 2; grid-row: 1; }
+    .header-center {
+        grid-column: 1 / -1;
+        grid-row: 2;
+        flex-wrap: wrap;
+        gap: 6px;
+    }
+
+    .conn-badge            { padding: 4px 8px; }
+    .conn-badge .device-name { font-size: 11px; }
+    .tab-btn               { padding: 5px 12px; font-size: 12px; }
+
+    /* Tab-View: scrollen statt clippen */
+    .tab-view {
+        overflow: visible;
+        padding: 10px 12px;
+        gap: 10px;
+    }
+
+    /* Verbinden-Leiste: umbrechen */
+    .connect-bar { flex-wrap: wrap; }
+
+    /* Phase-Leiste */
+    .block-step  { font-size: 12px; padding: 6px 8px; }
+    .phase-timer { font-size: 22px; }
+
+    /* Einspaltiges Dashboard */
+    .dashboard-grid { grid-template-columns: 1fr; }
+
+    /* Linke Spalte */
+    .hr-value  { font-size: 72px; }
+    .hr-unit   { font-size: 18px; }
+
+    /* Watt-Panel: 2×2 statt 5er-Reihe */
+    .watts-grid {
+        grid-template-columns: 1fr 1fr;
+        gap: 8px;
+    }
+    .watts-divider { display: none; }
+    .watts-block   { padding: 0; }
+
+    /* Aktions-Buttons: 2 Spalten */
+    .action-buttons {
+        grid-template-columns: 1fr 1fr;
+    }
+
+    /* Status-Leiste */
+    .status-bar { padding: 6px 12px; }
+
+    /* Einstellungen */
+    .settings-field input[type="number"] { font-size: 16px; }
+}
+
+/* ═══════════════════════════════════════════════════════════
+   RESPONSIVE – Smartphone Querformat
+   ═══════════════════════════════════════════════════════════ */
+
+@media (max-width: 900px) and (orientation: landscape) {
+
+    body { overflow: auto; }
+    #app { height: auto; min-height: 100dvh; }
+
+    .app-header {
+        grid-template-columns: auto 1fr auto;
+        height: 44px;
+        padding: 0 12px;
+    }
+
+    .tab-view { overflow: visible; padding: 8px 12px; gap: 8px; }
+
+    /* Zweispaltig bleiben, aber schmälere rechte Spalte */
+    .dashboard-grid { grid-template-columns: 1fr 300px; }
+
+    .hr-value { font-size: 64px; }
+    .phase-timer { font-size: 22px; }
+
+    .action-buttons { grid-template-columns: 1fr 1fr 1fr; }
+}
