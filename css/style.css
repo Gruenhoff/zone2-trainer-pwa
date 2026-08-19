@@ -250,6 +250,25 @@ body {
 .more[open] > summary::before { content: '▾ '; }
 .more > .field-grid { margin-top: 0.5rem; }
 
+.diag-log {
+    margin: 0.5rem 0;
+    padding: 0.55rem;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.68rem;
+    line-height: 1.5;
+    color: var(--text-muted);
+    max-height: 220px;
+    overflow: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+.diag-log .lvl-error { color: var(--red); }
+.diag-log .lvl-warn  { color: var(--yellow); }
+.diag-log .lvl-ok    { color: var(--green); }
+
 .hint-card > summary {
     font-size: 0.85rem; font-weight: 600; cursor: pointer;
     list-style: none; padding: 0.15rem 0;

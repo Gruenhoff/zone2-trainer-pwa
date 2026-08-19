@@ -30,7 +30,13 @@ const OP_RESPONSE         = 0x80;
 
 const RESULT_SUCCESS = 0x01;
 
-const WRITE_TIMEOUT_MS = 3000;
+const WRITE_TIMEOUT_MS   = 3000;
+// Der Handschlag beim Verbinden bekommt mehr Zeit als eine laufende
+// Watt-Vorgabe: manche Trainer antworten direkt nach dem Verbinden traege.
+const HANDSHAKE_TIMEOUT_MS = 6000;
+// Kurze Ruhe nach dem Einschalten der Benachrichtigungen. Schreibt man
+// sofort danach, verschluckt manche Android-Bluetooth-Schicht die Antwort.
+const SETTLE_MS = 400;
 
 export class D100Bluetooth extends BleDevice {
     constructor() {
@@ -62,13 +68,29 @@ export class D100Bluetooth extends BleDevice {
     }
 
     async _setupServices(server) {
-        const service = await server.getPrimaryService(FTMS_SERVICE_UUID);
+        let service;
+        try {
+            service = await server.getPrimaryService(FTMS_SERVICE_UUID);
+        } catch (err) {
+            // Häufigste Ursache auf Android: ein veralteter GATT-Zwischenspeicher.
+            // Dann hilft nur, das Gerät in den Bluetooth-Einstellungen zu
+            // entfernen und neu zu koppeln.
+            this._step(`${this.label}: FTMS-Dienst nicht gefunden (${err.message})`, 'error');
+            throw new Error('FTMS-Dienst nicht gefunden. Gerät in den Android-Bluetooth-Einstellungen entfernen und neu koppeln.');
+        }
+        this._step(`${this.label}: FTMS-Dienst gefunden`);
 
-        this.controlPoint = await service.getCharacteristic(CONTROL_POINT_UUID);
+        try {
+            this.controlPoint = await service.getCharacteristic(CONTROL_POINT_UUID);
+        } catch (err) {
+            this._step(`${this.label}: Steuerkanal nicht gefunden (${err.message})`, 'error');
+            throw new Error('Steuerkanal (Control Point) nicht gefunden. Trainer unterstützt womöglich keine ERG-Steuerung.');
+        }
         this.controlPoint.addEventListener('characteristicvaluechanged', (e) =>
             this._handleResponse(e.target.value)
         );
         await this.controlPoint.startNotifications();
+        this._step(`${this.label}: Steuerkanal bereit`);
 
         // Indoor Bike Data: Leistung und Trittfrequenz (nicht jedes Gerät sendet das)
         try {
@@ -90,24 +112,61 @@ export class D100Bluetooth extends BleDevice {
 
         // Warteschlange aus einer früheren Verbindung verwerfen
         this._flushQueue(new Error('Verbindung neu aufgebaut'));
+    }
 
+    /**
+     * FTMS-Handschlag - bewusst NACH dem Verbinden und ohne Rückwirkung darauf.
+     *
+     * Das war der Fehler der vorherigen Fassung: der Handschlag lief mitten im
+     * Verbindungsaufbau, und eine ausbleibende Bestätigung riss die längst
+     * stehende Bluetooth-Verbindung wieder ein. Der Trainer tauchte im
+     * Auswahldialog auf, ließ sich aber nie verbinden.
+     */
+    async _afterConnect() {
+        await new Promise((r) => setTimeout(r, SETTLE_MS));
         await this.takeControl();
-
-        // Nach einem Wiederverbinden die zuletzt gewollte Vorgabe erneut setzen
         if (this.lastTargetSent != null) {
             await this.setTargetPower(this.lastTargetSent);
         }
     }
 
-    /** Steuerung anfordern und Training starten */
+    /**
+     * Steuerung anfordern und Training starten.
+     *
+     * Wirft nie. Bleibt die Bestätigung aus, gilt die Steuerung als
+     * unbestätigt - Watt-Vorgaben werden trotzdem versucht, weil etliche
+     * Trainer sie auch ohne saubere Antwort auf Opcode 0x00 umsetzen.
+     * @returns {Promise<boolean>} ob die Steuerung bestätigt wurde
+     */
     async takeControl() {
         this.hasControl = false;
-        await this._enqueue(new Uint8Array([OP_REQUEST_CONTROL]), OP_REQUEST_CONTROL);
-        await this._enqueue(new Uint8Array([OP_START_RESUME]), OP_START_RESUME).catch(() => {
-            // Manche Geräte antworten auf Start/Resume mit einem Fehler, wenn sie
-            // bereits laufen. Das ist unkritisch.
-        });
-        this.hasControl = true;
+
+        for (let versuch = 1; versuch <= 3; versuch++) {
+            try {
+                await this._enqueue(new Uint8Array([OP_REQUEST_CONTROL]), OP_REQUEST_CONTROL,
+                                    { timeoutMs: HANDSHAKE_TIMEOUT_MS });
+                this.hasControl = true;
+                this._step(`${this.label}: Steuerung übernommen`, 'ok');
+                break;
+            } catch (err) {
+                this._step(`${this.label}: Steuerung anfordern, Versuch ${versuch} von 3 fehlgeschlagen (${err.message})`,
+                           versuch === 3 ? 'warn' : 'info');
+                if (versuch < 3) await new Promise((r) => setTimeout(r, 700));
+            }
+        }
+
+        // Start/Resume ist ohnehin nachrangig: viele Geräte antworten mit
+        // einem Fehler, wenn sie bereits laufen.
+        try {
+            await this._enqueue(new Uint8Array([OP_START_RESUME]), OP_START_RESUME,
+                                { timeoutMs: HANDSHAKE_TIMEOUT_MS });
+        } catch { /* unkritisch */ }
+
+        if (!this.hasControl) {
+            this._error(`${this.label} bestätigt die Steuerung nicht. Watt-Vorgaben werden trotzdem gesendet - `
+                      + 'falls der Trainer nicht reagiert, bitte andere Trainings-Apps schließen und den Trainer kurz vom Strom nehmen.');
+        }
+        return this.hasControl;
     }
 
     /**
@@ -118,6 +177,9 @@ export class D100Bluetooth extends BleDevice {
         const w = Math.max(0, Math.min(2000, Math.round(watts)));
         this.lastTargetSent = w;
 
+        // Bewusst nicht an hasControl gekoppelt: bleibt die Bestätigung des
+        // Handschlags aus, heißt das nicht, dass der Trainer die Vorgabe
+        // ignoriert. Der ERG-Wächter merkt es, falls doch.
         if (!this.isConnected || !this.controlPoint) return false;
 
         const buf = new Uint8Array(3);

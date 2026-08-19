@@ -20,7 +20,7 @@ export const BleState = {
     RECONNECTING: 'reconnecting',
 };
 
-const CONNECT_TIMEOUT_MS = 12_000;
+const CONNECT_TIMEOUT_MS = 20_000;
 const BACKOFF_MS = [1000, 2000, 4000, 8000, 12_000, 20_000];
 
 /** Merkt sich die zuletzt gekoppelte Geräte-Kennung je Sensortyp */
@@ -50,6 +50,11 @@ export class BleDevice {
         this._retryTimer    = null;
         this._listenerBound = false;
         this._lastDataTime  = 0;
+
+        // Schrittprotokoll fuer die Fehlersuche. Ohne das laesst sich von aussen
+        // nicht unterscheiden, ob schon die Verbindung, das Finden der Dienste
+        // oder erst der Handschlag danach gescheitert ist.
+        this.log = [];
 
         this.onConnect      = null;
         this.onDisconnect   = null;
@@ -164,23 +169,46 @@ export class BleDevice {
     async _connectGatt() {
         if (!this.device?.gatt) throw new Error('Kein GATT-Server verfügbar');
 
-        this._status(`Verbinde ${this.label}...`);
+        this._step(`${this.label}: verbinde...`);
 
         // gatt.connect() kann auf Android ohne Rückmeldung hängen bleiben.
-        this.server = await this._withTimeout(
-            this.device.gatt.connect(),
-            CONNECT_TIMEOUT_MS,
-            `${this.label}: Zeitüberschreitung beim Verbinden`
-        );
+        try {
+            this.server = await this._withTimeout(
+                this.device.gatt.connect(),
+                CONNECT_TIMEOUT_MS,
+                `${this.label}: Zeitüberschreitung beim Verbinden`
+            );
+        } catch (err) {
+            // Die Zeitgrenze bricht nur unser Warten ab, nicht den Versuch
+            // selbst. Ohne das Trennen bliebe womöglich eine halbfertige
+            // Verbindung stehen, die jeden neuen Versuch blockiert.
+            try { this.device.gatt.disconnect(); } catch { /* egal */ }
+            this._step(`${this.label}: Verbinden fehlgeschlagen (${err.message})`, 'error');
+            throw err;
+        }
 
+        this._step(`${this.label}: Verbindung steht, suche Dienste`);
         await this._setupServices(this.server);
+        this._step(`${this.label}: Dienste bereit`);
 
         this._attempt = 0;
         this._markData();
         this._setState(BleState.CONNECTED);
-        this._status(`${this.label} verbunden`);
+        this._step(`${this.label} verbunden`, 'ok');
         if (this.onConnect) this.onConnect();
+
+        // Alles ab hier ist Nachbereitung. Sie darf die bestehende Verbindung
+        // nicht zu Fall bringen - und sie wird bewusst NICHT abgewartet: ein
+        // Trainer, der den Handschlag nicht beantwortet, haelt sonst den
+        // Kopplungsablauf eine halbe Minute lang auf, obwohl die Verbindung
+        // laengst steht.
+        this._afterConnect().catch((err) => {
+            this._step(`${this.label}: Nachbereitung unvollständig (${err.message})`, 'warn');
+        });
     }
+
+    /** Nachbereitung nach hergestellter Verbindung. Fehler sind hier folgenlos. */
+    async _afterConnect() { /* von Unterklassen */ }
 
     /** Von den Unterklassen zu implementieren: Dienste und Benachrichtigungen einrichten */
     async _setupServices(_server) {
@@ -315,6 +343,13 @@ export class BleDevice {
         if (this.state === state) return;
         this.state = state;
         if (this.onStateChange) this.onStateChange(state, this.label);
+    }
+
+    /** Schritt protokollieren und zugleich als Status melden */
+    _step(msg, level = 'info') {
+        this.log.push({ t: Date.now(), msg, level });
+        if (this.log.length > 40) this.log.shift();
+        this._status(msg);
     }
 
     _status(msg) { if (this.onStatus) this.onStatus(msg); }

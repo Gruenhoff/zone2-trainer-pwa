@@ -204,6 +204,7 @@ class Zone2App {
         this._bindStopButton();
 
         this.$('btn-export-csv').addEventListener('click', () => this.history.downloadCSV());
+        this.$('btn-copy-diag').addEventListener('click', () => this._copyDiagnostics());
 
         this.$('btn-resume').addEventListener('click',      () => this._resumeSession());
         this.$('btn-resume-save').addEventListener('click', () => this._salvageSession());
@@ -481,6 +482,61 @@ class Zone2App {
 
         this._updateWattSourceHint();
         this._updateConnectAllButton();
+        this._renderDiagnostics();
+    }
+
+    /**
+     * Verbindungsprotokoll aller drei Geräte.
+     *
+     * Ohne das ist von außen nicht zu unterscheiden, ob eine fehlgeschlagene
+     * Kopplung schon an der Bluetooth-Verbindung, am Finden des FTMS-Dienstes
+     * oder erst am Handschlag danach scheitert – und genau diese Unterscheidung
+     * entscheidet, was zu tun ist.
+     */
+    _renderDiagnostics() {
+        const el = this.$('diag-log');
+        if (!el) return;
+
+        const eintraege = [];
+        for (const dev of [this.h10, this.pm, this.d100]) {
+            for (const e of (dev.log ?? [])) eintraege.push(e);
+        }
+        if (!eintraege.length) { el.textContent = 'Noch keine Einträge.'; return; }
+
+        eintraege.sort((a, b) => a.t - b.t);
+
+        el.innerHTML = eintraege.slice(-60).map((e) => {
+            const zeit = new Date(e.t).toLocaleTimeString('de-DE', { hour12: false });
+            const cls  = e.level && e.level !== 'info' ? ` class="lvl-${e.level}"` : '';
+            const text = String(e.msg)
+                .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+            return `<span${cls}>${zeit}  ${text}</span>`;
+        }).join('\n');
+    }
+
+    async _copyDiagnostics() {
+        const zeilen = [];
+        zeilen.push('Zone2 Trainer – Verbindungsprotokoll');
+        zeilen.push(new Date().toLocaleString('de-DE'));
+        zeilen.push(navigator.userAgent);
+        zeilen.push(`Web Bluetooth: ${!!navigator.bluetooth}, getDevices: ${typeof navigator.bluetooth?.getDevices === 'function'}`);
+        zeilen.push('');
+        for (const dev of [this.h10, this.pm, this.d100]) {
+            zeilen.push(`--- ${dev.label} (${dev.state}) ---`);
+            for (const e of (dev.log ?? [])) {
+                zeilen.push(`${new Date(e.t).toLocaleTimeString('de-DE', { hour12: false })}  [${e.level ?? 'info'}] ${e.msg}`);
+            }
+            zeilen.push('');
+        }
+        const text = zeilen.join('\n');
+        try {
+            await navigator.clipboard.writeText(text);
+            this._toast('Protokoll kopiert.', 'ok');
+        } catch {
+            // Ohne Zwischenablage-Freigabe wenigstens sichtbar machen
+            this.$('diag-log').textContent = text;
+            this._toast('Zwischenablage nicht erlaubt – Text steht oben zum Markieren.', 'warn');
+        }
     }
 
     _updateWattSourceHint() {

@@ -106,6 +106,7 @@ class FakeDevice {
         this.label = label;
         this.state = State.DISCONNECTED;
         this._lastDataTime = 0;
+        this.log = [];
 
         this.onConnect = null;
         this.onDisconnect = null;
@@ -122,7 +123,7 @@ class FakeDevice {
     async connect() {
         this._setState(State.CONNECTED);
         this._markData();
-        this._status(`${this.label} verbunden (Demo)`);
+        this._step(`${this.label} verbunden (Demo)`, 'ok');
         this.onConnect?.();
         return true;
     }
@@ -153,6 +154,12 @@ class FakeDevice {
         this.state = s;
         this.onStateChange?.(s, this.label);
     }
+    _step(msg, level = 'info') {
+        this.log.push({ t: Date.now(), msg, level });
+        if (this.log.length > 40) this.log.shift();
+        this._status(msg);
+    }
+
     _status(m) { this.onStatus?.(m); }
     _error(m)  { this.onError?.(m); }
 }
