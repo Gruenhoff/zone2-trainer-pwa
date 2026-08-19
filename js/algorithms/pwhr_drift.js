@@ -1,95 +1,129 @@
 /**
- * PwHR Drift Berechnung
+ * PwHR-Drift (kardiovaskuläre Entkopplung)
  *
- * Expandierendes Fenster:
- * - 0–10 min: kein Drift ("Warte auf Daten...")
- * - Ab 10 min: erste Anzeige (erste 5 min vs. zweite 5 min)
- * - Fenster wächst kontinuierlich (erste Hälfte vs. zweite Hälfte der Arbeitszeit)
- * - Maximum: 30 min Referenzfenster (erste 30 min fix, zweite Hälfte = rollend letzte 30 min)
+ * PwHR = Watt / Herzfrequenz. Sinkt dieses Verhältnis im Lauf des Arbeitsblocks,
+ * brauchst du für dieselbe Leistung mehr Schläge – der klassische Marker dafür,
+ * dass die Einheit aus dem Grundlagenbereich herausläuft.
  *
- * PwHR = Watt / HR
- * Drift (%) = (PwHR_zweite - PwHR_erste) / PwHR_erste * -100
- * (negativ = Drift nach oben = HR steigt für gleiche Leistung)
+ *   Drift (%) = (PwHR_erste_Hälfte − PwHR_zweite_Hälfte) / PwHR_erste_Hälfte × 100
+ *
+ * Positiv bedeutet also: Effizienz nimmt ab. Unter etwa 5 % gilt eine Einheit
+ * gemeinhin als sauber aerob.
+ *
+ * Entscheidend gegenüber vorher: Messpunkte werden nur übernommen, wenn HR und
+ * Leistung beide frisch sind. Ein eingefrorener Wert eines abgerissenen Sensors
+ * würde die Rechnung sonst still verfälschen – und zwar in Richtung
+ * "alles in Ordnung", also genau falsch herum.
  */
 
-const MAX_WINDOW_MIN = 30;
+const MAX_WINDOW_MIN  = 30;
 const MIN_ELAPSED_MIN = 10;
+const MIN_SAMPLES     = 10;
 
 export class PwHRDrift {
     constructor() {
-        this._samples = []; // { time: ms, hr: number, watts: number }
-        this._workBlockStart = null;
-        this._lastUpdateTime = 0;
-        this._updateIntervalMs = 30_000; // alle 30s neu berechnen
+        this.reset();
     }
 
-    /** Setzt den Startpunkt des Arbeitsblocks */
+    reset() {
+        this._samples        = [];   // { time, hr, watts }
+        this._workBlockStart = null;
+        this._rejected       = 0;
+    }
+
     setWorkBlockStart(timeMs = Date.now()) {
         this._workBlockStart = timeMs;
-        this._samples = [];
-        this._lastUpdateTime = 0;
+        this._samples  = [];
+        this._rejected = 0;
     }
 
-    /** Neues Sample hinzufügen (sollte ~1x/s aufgerufen werden) */
-    addSample(hr, watts, now = Date.now()) {
-        if (!this._workBlockStart) return;
-        if (!hr || !watts || hr <= 0 || watts <= 0) return;
+    get workBlockStart() { return this._workBlockStart; }
+    get sampleCount()    { return this._samples.length; }
+
+    /**
+     * Messpunkt hinzufügen, etwa einmal pro Sekunde.
+     * @param {number|null} hr
+     * @param {number|null} watts
+     * @param {number} now
+     * @param {boolean} fresh – sind beide Werte aktuell (keine toten Sensoren)
+     */
+    addSample(hr, watts, now = Date.now(), fresh = true) {
+        if (!this._workBlockStart) return false;
+        if (!fresh) { this._rejected++; return false; }
+        if (!hr || !watts || hr <= 0 || watts <= 0) { this._rejected++; return false; }
+        // Grobe Plausibilität, damit einzelne Ausreißer die Mittelwerte nicht kippen
+        if (hr < 40 || hr > 220 || watts > 1000) { this._rejected++; return false; }
+
         this._samples.push({ time: now, hr, watts });
+        return true;
+    }
+
+    /** Nach einer Wiederaufnahme: Messpunkte aus den gespeicherten Rohdaten zurückholen */
+    restoreFromRecords(records, workBlockStart) {
+        this._workBlockStart = workBlockStart;
+        this._samples = [];
+        for (const r of records ?? []) {
+            if (r.t < workBlockStart) continue;
+            if (!r.hr || !r.w || r.hr <= 0 || r.w <= 0) continue;
+            this._samples.push({ time: r.t, hr: r.hr, watts: r.w });
+        }
     }
 
     /**
-     * Aktuellen Drift berechnen.
-     * @returns {{ drift: number|null, ready: boolean, firstHalf: number, secondHalf: number }}
+     * @returns {{ready:boolean, drift:number|null, elapsedMin:number,
+     *             firstHalf:number|null, secondHalf:number|null,
+     *             coverage:number}}
      */
     calculate(now = Date.now()) {
-        if (!this._workBlockStart) return { drift: null, ready: false };
+        if (!this._workBlockStart) {
+            return { ready: false, drift: null, elapsedMin: 0, coverage: 0 };
+        }
 
         const elapsedMin = (now - this._workBlockStart) / 60_000;
+        const coverage = this._samples.length + this._rejected > 0
+            ? this._samples.length / (this._samples.length + this._rejected)
+            : 0;
 
         if (elapsedMin < MIN_ELAPSED_MIN) {
-            return { drift: null, ready: false, elapsedMin };
+            return { ready: false, drift: null, elapsedMin, coverage };
         }
 
-        // Fenstergröße: min(elapsedMin/2, MAX_WINDOW_MIN) Minuten
-        const halfWindowMin = Math.min(elapsedMin / 2, MAX_WINDOW_MIN);
-        const halfWindowMs  = halfWindowMin * 60_000;
+        const halfWindowMs = Math.min(elapsedMin / 2, MAX_WINDOW_MIN) * 60_000;
 
-        // Erstes Fenster: ab Arbeitsblock-Start bis +halfWindowMs
-        // Zweites Fenster: letzte halfWindowMs bis jetzt
-        const firstStart  = this._workBlockStart;
         const firstEnd    = this._workBlockStart + halfWindowMs;
         const secondStart = now - halfWindowMs;
-        const secondEnd   = now;
 
-        const firstSamples  = this._samples.filter((s) => s.time >= firstStart && s.time <= firstEnd);
-        const secondSamples = this._samples.filter((s) => s.time >= secondStart && s.time <= secondEnd);
+        const first  = this._samples.filter((s) => s.time >= this._workBlockStart && s.time <= firstEnd);
+        const second = this._samples.filter((s) => s.time >= secondStart && s.time <= now);
 
-        if (firstSamples.length < 10 || secondSamples.length < 10) {
-            return { drift: null, ready: false, elapsedMin };
+        if (first.length < MIN_SAMPLES || second.length < MIN_SAMPLES) {
+            return { ready: false, drift: null, elapsedMin, coverage };
         }
 
-        const avgPwHR = (samples) => {
-            const ratios = samples.map((s) => s.watts / s.hr);
-            return ratios.reduce((a, b) => a + b, 0) / ratios.length;
-        };
+        const avgPwHR = (arr) => arr.reduce((sum, s) => sum + s.watts / s.hr, 0) / arr.length;
 
-        const pwhrFirst  = avgPwHR(firstSamples);
-        const pwhrSecond = avgPwHR(secondSamples);
+        const pwhrFirst  = avgPwHR(first);
+        const pwhrSecond = avgPwHR(second);
+        if (!pwhrFirst) {
+            return { ready: false, drift: null, elapsedMin, coverage };
+        }
 
-        // Drift: wenn HR für gleiche Leistung steigt, sinkt PwHR → Drift positiv
         const drift = ((pwhrFirst - pwhrSecond) / pwhrFirst) * 100;
 
         return {
-            drift: Math.round(drift * 10) / 10,
-            ready: true,
+            ready:      true,
+            drift:      Math.round(drift * 10) / 10,
             elapsedMin,
-            firstHalf: Math.round(pwhrFirst * 100) / 100,
+            coverage,
+            firstHalf:  Math.round(pwhrFirst * 100) / 100,
             secondHalf: Math.round(pwhrSecond * 100) / 100,
         };
     }
 
-    reset() {
-        this._workBlockStart = null;
-        this._samples = [];
+    /** Minuten, bis die erste Berechnung möglich ist */
+    minutesUntilReady(now = Date.now()) {
+        if (!this._workBlockStart) return MIN_ELAPSED_MIN;
+        const elapsedMin = (now - this._workBlockStart) / 60_000;
+        return Math.max(0, Math.ceil(MIN_ELAPSED_MIN - elapsedMin));
     }
 }

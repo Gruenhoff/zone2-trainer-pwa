@@ -1,236 +1,313 @@
 /**
  * Van Rysel D100 – FTMS (Fitness Machine Service, 0x1826)
- * ERG-Steuerung über Fitness Machine Control Point (0x2AD9)
+ *
+ * Zwei Dinge sind hier entscheidend für einen stabilen ERG-Betrieb:
+ *
+ * 1. Schreibvorgänge auf den Control Point werden serialisiert. Der Standard
+ *    erlaubt genau einen offenen Befehl; überlappende Schreibvorgänge sind der
+ *    übliche Grund, warum ein Trainer stillschweigend aus dem ERG-Modus fällt.
+ *    Neue Watt-Vorgaben, die noch in der Warteschlange stehen, werden dabei
+ *    zusammengefasst – es zählt ohnehin nur der zuletzt gewünschte Wert.
+ *
+ * 2. Eine Zeitüberschreitung gilt als Fehlschlag, nicht als Erfolg. Vorher
+ *    konnte eine verlorene Vorgabe unbemerkt bleiben, während die Anzeige
+ *    etwas anderes behauptete.
  */
 
-const FTMS_SERVICE_UUID    = 0x1826;
-const CONTROL_POINT_UUID   = 0x2ad9;
-const MACHINE_STATUS_UUID  = 0x2ada;
-const BIKE_DATA_UUID       = 0x2ad2;
+import { BleDevice } from './ble_base.js';
 
-// FTMS Control Point Opcodes
-const OP_REQUEST_CONTROL   = 0x00;
-const OP_RESET             = 0x01;
-const OP_SET_TARGET_POWER  = 0x05;
-const OP_START_RESUME      = 0x07;
-const OP_RESPONSE          = 0x80;
+const FTMS_SERVICE_UUID   = 0x1826;
+const CONTROL_POINT_UUID  = 0x2ad9;
+const MACHINE_STATUS_UUID = 0x2ada;
+const BIKE_DATA_UUID      = 0x2ad2;
 
-// Response Codes
-const RESULT_SUCCESS        = 0x01;
+// Control-Point-Opcodes
+const OP_REQUEST_CONTROL  = 0x00;
+const OP_RESET            = 0x01;
+const OP_SET_TARGET_POWER = 0x05;
+const OP_START_RESUME     = 0x07;
+const OP_RESPONSE         = 0x80;
 
-export class D100Bluetooth {
+const RESULT_SUCCESS = 0x01;
+
+const WRITE_TIMEOUT_MS = 3000;
+
+export class D100Bluetooth extends BleDevice {
     constructor() {
-        this.device = null;
-        this.server = null;
+        super({
+            key:      'd100',
+            label:    'D100',
+            filters:  [
+                { namePrefix: 'D100' },
+                { namePrefix: 'Van Rysel' },
+                { services: [FTMS_SERVICE_UUID] },
+            ],
+            services: [FTMS_SERVICE_UUID],
+        });
+
         this.controlPoint = null;
-        this.isConnected = false;
-        this._reconnectTimer = null;
-        this._stopReconnect = false;
-        this._pendingResponse = null; // { resolve, reject, opcode }
 
-        this.onConnect    = null;
-        this.onDisconnect = null;
-        this.onError      = null;
-        this.onStatus     = null;
-        this.onPower      = null;  // (watts) => void (aus Indoor Bike Data, optional)
+        this.onPower         = null;  // (watt) => void
+        this.onCadence       = null;  // (rpm) => void
+        this.onControlLost   = null;  // () => void
+        this.onMachineStatus = null;  // (text) => void
+
+        this.lastTargetSent = null;
+        this.lastAckTime    = 0;
+        this.hasControl     = false;
+
+        this._queue   = [];
+        this._running = false;
+        this._pending = null;   // { opcode, resolve, reject, timer }
     }
 
-    static isAvailable() {
-        return typeof navigator !== 'undefined' && !!navigator.bluetooth;
-    }
+    async _setupServices(server) {
+        const service = await server.getPrimaryService(FTMS_SERVICE_UUID);
 
-    async connect() {
-        if (!D100Bluetooth.isAvailable()) {
-            this._error('Web Bluetooth nicht verfügbar.');
-            return false;
-        }
-        this._stopReconnect = false;
-        try {
-            this._status('Suche D100 Smart Trainer...');
-            this.device = await navigator.bluetooth.requestDevice({
-                filters: [
-                    { namePrefix: 'D100' },
-                    { namePrefix: 'Van Rysel' },
-                    { services: [FTMS_SERVICE_UUID] },
-                ],
-                optionalServices: [FTMS_SERVICE_UUID],
-            });
-            this.device.addEventListener('gattserverdisconnected', () => this._onDisconnected());
-            await this._connectGatt();
-            return true;
-        } catch (err) {
-            if (err.name === 'NotFoundError') {
-                this._error('Kein D100 ausgewählt.');
-            } else if (err.message?.toLowerCase().includes('already')) {
-                this._error('D100 bereits belegt – bitte Zwift/Sufferfest/MyWhoosh schliessen.');
-            } else {
-                this._error(`D100 Verbindungsfehler: ${err.message}`);
-            }
-            return false;
-        }
-    }
-
-    async _connectGatt() {
-        this._status('Verbinde D100...');
-        try {
-            this.server = await this.device.gatt.connect();
-        } catch (err) {
-            if (err.name === 'NetworkError' || err.message?.toLowerCase().includes('already')) {
-                throw new Error('D100 bereits belegt – bitte Zwift/Sufferfest/MyWhoosh schliessen.');
-            }
-            throw err;
-        }
-
-        const service = await this.server.getPrimaryService(FTMS_SERVICE_UUID);
         this.controlPoint = await service.getCharacteristic(CONTROL_POINT_UUID);
-
-        // Notifications auf Control Point aktivieren (für Antworten)
         this.controlPoint.addEventListener('characteristicvaluechanged', (e) =>
             this._handleResponse(e.target.value)
         );
         await this.controlPoint.startNotifications();
 
-        // Optional: Indoor Bike Data lesen
+        // Indoor Bike Data: Leistung und Trittfrequenz (nicht jedes Gerät sendet das)
         try {
             const bikeData = await service.getCharacteristic(BIKE_DATA_UUID);
             bikeData.addEventListener('characteristicvaluechanged', (e) =>
                 this._parseBikeData(e.target.value)
             );
             await bikeData.startNotifications();
-        } catch { /* nicht alle D100 senden Bike Data */ }
+        } catch { /* optional */ }
 
-        // FTMS Steuerung übernehmen
-        await this._requestControl();
-        await this._startTraining();
-
-        this.isConnected = true;
-        this._status('D100 verbunden');
-        if (this.onConnect) this.onConnect();
-    }
-
-    /** Opcode 0x00: Steuerung anfordern */
-    async _requestControl() {
-        await this._writeAndWait(new Uint8Array([OP_REQUEST_CONTROL]), OP_REQUEST_CONTROL);
-    }
-
-    /** Opcode 0x07: Training starten */
-    async _startTraining() {
-        await this._writeAndWait(new Uint8Array([OP_START_RESUME]), OP_START_RESUME);
-    }
-
-    /**
-     * ERG-Watt-Vorgabe setzen
-     * @param {number} watts – Ziel-Watt (0–2000)
-     */
-    async setTargetPower(watts) {
-        if (!this.isConnected || !this.controlPoint) return;
-        const w = Math.max(0, Math.min(2000, Math.round(watts)));
-        const buf = new Uint8Array(3);
-        buf[0] = OP_SET_TARGET_POWER;
-        // int16 LE
-        buf[1] = w & 0xff;
-        buf[2] = (w >> 8) & 0xff;
+        // Machine Status: meldet u.a., wenn der Trainer selbst pausiert
         try {
-            await this._writeAndWait(buf, OP_SET_TARGET_POWER, 2000);
-        } catch (err) {
-            this._error(`Watt-Vorgabe fehlgeschlagen: ${err.message}`);
+            const status = await service.getCharacteristic(MACHINE_STATUS_UUID);
+            status.addEventListener('characteristicvaluechanged', (e) =>
+                this._parseMachineStatus(e.target.value)
+            );
+            await status.startNotifications();
+        } catch { /* optional */ }
+
+        // Warteschlange aus einer früheren Verbindung verwerfen
+        this._flushQueue(new Error('Verbindung neu aufgebaut'));
+
+        await this.takeControl();
+
+        // Nach einem Wiederverbinden die zuletzt gewollte Vorgabe erneut setzen
+        if (this.lastTargetSent != null) {
+            await this.setTargetPower(this.lastTargetSent);
         }
     }
 
-    /** Schreibt auf Control Point und wartet auf Antwort */
-    _writeAndWait(data, expectedOpcode, timeoutMs = 3000) {
+    /** Steuerung anfordern und Training starten */
+    async takeControl() {
+        this.hasControl = false;
+        await this._enqueue(new Uint8Array([OP_REQUEST_CONTROL]), OP_REQUEST_CONTROL);
+        await this._enqueue(new Uint8Array([OP_START_RESUME]), OP_START_RESUME).catch(() => {
+            // Manche Geräte antworten auf Start/Resume mit einem Fehler, wenn sie
+            // bereits laufen. Das ist unkritisch.
+        });
+        this.hasControl = true;
+    }
+
+    /**
+     * ERG-Watt-Vorgabe setzen.
+     * @returns {Promise<boolean>} ob der Trainer bestätigt hat
+     */
+    async setTargetPower(watts) {
+        const w = Math.max(0, Math.min(2000, Math.round(watts)));
+        this.lastTargetSent = w;
+
+        if (!this.isConnected || !this.controlPoint) return false;
+
+        const buf = new Uint8Array(3);
+        buf[0] = OP_SET_TARGET_POWER;
+        buf[1] = w & 0xff;
+        buf[2] = (w >> 8) & 0xff;
+
+        try {
+            await this._enqueue(buf, OP_SET_TARGET_POWER, { coalesceKey: 'power' });
+            this.lastAckTime = Date.now();
+            return true;
+        } catch (err) {
+            this._error(`Watt-Vorgabe nicht bestätigt: ${err.message}`);
+            return false;
+        }
+    }
+
+    /** Vorgabe erneut senden, ohne sie zu ändern – hält den ERG-Modus wach */
+    async refreshTargetPower() {
+        if (this.lastTargetSent == null) return false;
+        return this.setTargetPower(this.lastTargetSent);
+    }
+
+    /** Nach vermutetem Steuerungsverlust: Kontrolle neu anfordern und Vorgabe setzen */
+    async reacquireControl() {
+        if (!this.isConnected) return false;
+        try {
+            await this.takeControl();
+            if (this.lastTargetSent != null) await this.setTargetPower(this.lastTargetSent);
+            return true;
+        } catch (err) {
+            this._error(`Steuerung konnte nicht zurückgeholt werden: ${err.message}`);
+            return false;
+        }
+    }
+
+    // ── Warteschlange ─────────────────────────────────────────────────────────
+
+    _enqueue(data, opcode, { coalesceKey = null, timeoutMs = WRITE_TIMEOUT_MS } = {}) {
         return new Promise((resolve, reject) => {
-            const timer = setTimeout(() => {
-                this._pendingResponse = null;
-                // Timeout ist nicht fatal – weiter machen
-                resolve();
-            }, timeoutMs);
-
-            this._pendingResponse = {
-                opcode: expectedOpcode,
-                resolve: () => { clearTimeout(timer); resolve(); },
-                reject: (reason) => { clearTimeout(timer); reject(reason); },
-            };
-
-            this.controlPoint.writeValueWithResponse(data).catch((err) => {
-                clearTimeout(timer);
-                this._pendingResponse = null;
-                reject(err);
-            });
+            if (coalesceKey) {
+                // Noch nicht gestartete Aufträge desselben Typs ersetzen – ein
+                // veralteter Watt-Wert muss nicht mehr geschrieben werden.
+                for (let i = this._queue.length - 1; i >= 0; i--) {
+                    if (this._queue[i].coalesceKey === coalesceKey) {
+                        this._queue[i].resolve(false);
+                        this._queue.splice(i, 1);
+                    }
+                }
+            }
+            this._queue.push({ data, opcode, resolve, reject, timeoutMs, coalesceKey });
+            this._drain();
         });
     }
 
+    async _drain() {
+        if (this._running) return;
+        this._running = true;
+
+        while (this._queue.length) {
+            const job = this._queue.shift();
+
+            if (!this.isConnected || !this.controlPoint) {
+                job.reject(new Error('nicht verbunden'));
+                continue;
+            }
+
+            try {
+                await new Promise((resolve, reject) => {
+                    const timer = setTimeout(() => {
+                        this._pending = null;
+                        reject(new Error('Zeitüberschreitung'));
+                    }, job.timeoutMs);
+
+                    this._pending = {
+                        opcode: job.opcode,
+                        resolve: () => { clearTimeout(timer); this._pending = null; resolve(); },
+                        reject:  (e) => { clearTimeout(timer); this._pending = null; reject(e); },
+                    };
+
+                    this.controlPoint.writeValueWithResponse(job.data).catch((err) => {
+                        clearTimeout(timer);
+                        this._pending = null;
+                        reject(err);
+                    });
+                });
+                job.resolve(true);
+            } catch (err) {
+                job.reject(err);
+            }
+        }
+
+        this._running = false;
+    }
+
+    _flushQueue(err) {
+        if (this._pending) {
+            this._pending.reject(err);
+            this._pending = null;
+        }
+        const queued = this._queue.splice(0);
+        for (const job of queued) job.reject(err);
+    }
+
     _handleResponse(data) {
-        if (data.byteLength < 3) return;
+        if (!data || data.byteLength < 3) return;
+        this._markData();
         if (data.getUint8(0) !== OP_RESPONSE) return;
 
         const requestOpcode = data.getUint8(1);
         const resultCode    = data.getUint8(2);
 
-        if (this._pendingResponse?.opcode === requestOpcode) {
-            const pending = this._pendingResponse;
-            this._pendingResponse = null;
-            if (resultCode === RESULT_SUCCESS) {
-                pending.resolve();
-            } else {
-                pending.reject(new Error(`FTMS Fehler: opcode ${requestOpcode}, code ${resultCode}`));
+        if (!this._pending || this._pending.opcode !== requestOpcode) return;
+
+        if (resultCode === RESULT_SUCCESS) {
+            this._pending.resolve();
+        } else {
+            // 0x05 = Control Not Permitted: wir haben die Steuerung verloren
+            if (resultCode === 0x05) {
+                this.hasControl = false;
+                if (this.onControlLost) this.onControlLost();
             }
+            this._pending.reject(new Error(this._resultText(resultCode)));
         }
     }
 
+    _resultText(code) {
+        switch (code) {
+            case 0x02: return 'Befehl nicht unterstützt';
+            case 0x03: return 'ungültiger Parameter';
+            case 0x04: return 'Ausführung fehlgeschlagen';
+            case 0x05: return 'Steuerung nicht erlaubt';
+            default:   return `Antwortcode ${code}`;
+        }
+    }
+
+    // ── Messdaten ─────────────────────────────────────────────────────────────
+
     _parseBikeData(data) {
-        // Bit 6 der Flags = Instantaneous Power vorhanden (wenn 0 = mehr Data)
-        // Vereinfacht: lesen wenn genug Bytes vorhanden
-        if (data.byteLength < 6) return;
+        if (!data || data.byteLength < 2) return;
+        this._markData();
+
         const flags = data.getUint16(0, true);
         let offset = 2;
-        // Bit 0: wenn gesetzt, kein Instantaneous Speed
-        const hasSpeed    = !(flags & 0x0001);
-        if (hasSpeed) offset += 2;
-        // Bit 2: Instantaneous Cadence
-        const hasCadence  = !!(flags & 0x0004);
-        if (hasCadence) offset += 2;
-        // Bit 4: Total Distance
-        const hasDist     = !!(flags & 0x0010);
-        if (hasDist) offset += 3;
-        // Bit 5: Resistance
-        const hasRes      = !!(flags & 0x0020);
-        if (hasRes) offset += 2;
-        // Bit 6: Instantaneous Power
-        const hasPower    = !!(flags & 0x0040);
-        if (hasPower && data.byteLength >= offset + 2) {
+
+        const need = (bytes) => {
+            if (offset + bytes > data.byteLength) return false;
+            return true;
+        };
+
+        // Reihenfolge und Feldbreiten laut FTMS-Spezifikation
+        if (!(flags & 0x0001)) { if (!need(2)) return; offset += 2; }  // Instantaneous Speed
+        if (flags & 0x0002)    { if (!need(2)) return; offset += 2; }  // Average Speed
+
+        if (flags & 0x0004) {                                          // Instantaneous Cadence
+            if (!need(2)) return;
+            const rpm = data.getUint16(offset, true) / 2;              // Einheit 0,5 rpm
+            offset += 2;
+            if (rpm >= 0 && rpm < 250 && this.onCadence) this.onCadence(Math.round(rpm));
+        }
+        if (flags & 0x0008) { if (!need(2)) return; offset += 2; }     // Average Cadence
+        if (flags & 0x0010) { if (!need(3)) return; offset += 3; }     // Total Distance (uint24)
+        if (flags & 0x0020) { if (!need(2)) return; offset += 2; }     // Resistance Level
+
+        if (flags & 0x0040) {                                          // Instantaneous Power
+            if (!need(2)) return;
             const watts = data.getInt16(offset, true);
+            offset += 2;
             if (this.onPower) this.onPower(Math.max(0, watts));
         }
     }
 
-    async _onDisconnected() {
-        this.isConnected = false;
-        this._status('D100 getrennt');
-        if (this.onDisconnect) this.onDisconnect();
-        if (!this._stopReconnect) this._scheduleReconnect();
-    }
+    _parseMachineStatus(data) {
+        if (!data || data.byteLength < 1) return;
+        this._markData();
+        const opcode = data.getUint8(0);
 
-    _scheduleReconnect() {
-        clearTimeout(this._reconnectTimer);
-        this._reconnectTimer = setTimeout(async () => {
-            if (this._stopReconnect || !this.device) return;
-            this._status('D100 Reconnect...');
-            try {
-                await this._connectGatt();
-            } catch {
-                this._scheduleReconnect();
+        // 0x02 = vom Nutzer gestoppt oder pausiert, 0x01 = Reset
+        if (opcode === 0x01 || opcode === 0x02) {
+            this.hasControl = false;
+            if (this.onControlLost) this.onControlLost();
+            if (this.onMachineStatus) {
+                this.onMachineStatus(opcode === 0x01 ? 'Trainer zurückgesetzt' : 'Trainer gestoppt oder pausiert');
             }
-        }, 5000);
+        }
     }
 
     disconnect() {
-        this._stopReconnect = true;
-        clearTimeout(this._reconnectTimer);
-        if (this.device?.gatt?.connected) this.device.gatt.disconnect();
-        this.isConnected = false;
+        this._flushQueue(new Error('getrennt'));
+        this.hasControl = false;
+        super.disconnect();
     }
-
-    _status(msg) { if (this.onStatus) this.onStatus(msg); }
-    _error(msg)  { if (this.onError)  this.onError(msg);  }
 }
