@@ -65,9 +65,6 @@ export class D100Bluetooth extends BleDevice {
         // keinen Steuerungsverlust ausloesen - sonst rettet die App eine
         // Verbindung, die gerade erst aufgebaut wird.
         this._handshakeRunning = false;
-        // Merkt einen echten Steuerungsverlust, der waehrend des Handschlags
-        // eintrifft - sonst wuerde ihn die Schlusszuweisung wieder zudecken.
-        this._controlLostDuringHandshake = false;
 
         this._queue   = [];
         this._running = false;
@@ -148,7 +145,6 @@ export class D100Bluetooth extends BleDevice {
     async takeControl() {
         this.hasControl = false;
         this._handshakeRunning = true;
-        this._controlLostDuringHandshake = false;
 
         // Bewusst eine lokale Variable: this.hasControl kann waehrend des
         // Handschlags von aussen umgelegt werden - etwa wenn der Trainer
@@ -185,9 +181,6 @@ export class D100Bluetooth extends BleDevice {
             this._handshakeRunning = false;
         }
 
-        // Ein waehrenddessen eingetroffener Reset wiegt schwerer als die
-        // Bestaetigung von vorhin.
-        if (this._controlLostDuringHandshake) bestaetigt = false;
         this.hasControl = bestaetigt;
 
         if (!bestaetigt) {
@@ -325,9 +318,12 @@ export class D100Bluetooth extends BleDevice {
         if (resultCode === RESULT_SUCCESS) {
             this._pending.resolve();
         } else {
-            // 0x05 = Control Not Permitted. Waehrend des Handschlags ist das
-            // kein Steuerungsverlust, sondern haeufig nur die Antwort auf
-            // Start/Resume bei einem bereits laufenden Trainer.
+            // 0x05 = Control Not Permitted. Das ist der einzige belastbare
+            // Hinweis auf einen Steuerungsverlust - er kommt als Antwort auf
+            // einen Befehl, den wir wirklich gesendet haben.
+            //
+            // Waehrend des Handschlags gilt er nicht: dort ist es haeufig nur
+            // die Antwort auf Start/Resume bei einem bereits laufenden Trainer.
             if (resultCode === 0x05 && !this._handshakeRunning) {
                 this.hasControl = false;
                 this._step(`${this.label}: Steuerung entzogen (Opcode ${requestOpcode})`, 'warn');
@@ -388,18 +384,27 @@ export class D100Bluetooth extends BleDevice {
         this._markData();
         const opcode = data.getUint8(0);
 
-        // Laut FTMS entzieht nur ein Reset (0x01) die Steuerung. "Gestoppt oder
-        // pausiert" (0x02) meldet ein Trainer voellig regulaer, solange niemand
-        // tritt - das als Steuerungsverlust zu werten hiesse, bei jeder
-        // Trinkpause eine intakte Verbindung zu "retten".
+        // Statusmeldungen sind Information, kein Beweis.
+        //
+        // Ein Steuerungsverlust laesst sich ausschliesslich daran erkennen, dass
+        // der Trainer einen tatsaechlich gesendeten Befehl mit "Steuerung nicht
+        // erlaubt" (0x05) ablehnt. Aus einer Statusmeldung darauf zu schliessen,
+        // war falsch: dieser D100 meldet "Reset" als Folge der uebernommenen
+        // Steuerung - er setzt dabei seine Parameter zurueck - und fuehrt
+        // unmittelbar danach Start/Resume anstandslos aus.
         if (opcode === 0x01) {
-            this.hasControl = false;
-            this._controlLostDuringHandshake = true;
-            this._step(`${this.label}: Trainer zurückgesetzt, Steuerung weg`, 'warn');
-            if (this.onControlLost) this.onControlLost();
+            // Nach einem Reset koennen die Vorgaben des Trainers geloescht sein,
+            // deshalb die aktuelle Watt-Vorgabe erneut schicken. Waehrend des
+            // Handschlags nicht: dort passiert das ohnehin gleich.
+            this._step(`${this.label}: Trainer meldet Reset, Vorgabe wird erneuert`);
             if (this.onMachineStatus) this.onMachineStatus('Trainer zurückgesetzt');
+            if (!this._handshakeRunning && this.lastTargetSent != null) {
+                this.setTargetPower(this.lastTargetSent).catch(() => {});
+            }
         } else if (opcode === 0x02) {
             this._step(`${this.label}: Trainer meldet gestoppt oder pausiert`);
+        } else if (opcode === 0x04) {
+            this._step(`${this.label}: Trainer meldet gestartet`);
         }
     }
 
