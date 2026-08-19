@@ -326,6 +326,23 @@ tr:last-child td { border-bottom: none; }
 }
 .ride-alert.warn { background: var(--yellow-dim); border-color: var(--yellow); }
 
+/* Dauerhafter Hinweis, wenn der Bildschirm nicht wachgehalten werden kann.
+   Bewusst nicht als kurz aufblitzende Meldung: geht der Bildschirm aus,
+   beendet Android die App im Hintergrund - das ist die haeufigste Ursache
+   dafuer, dass eine Einheit mitten drin einfach verschwindet. */
+.ride-lockwarn {
+    flex-shrink: 0;
+    background: var(--yellow-dim);
+    border: 1px solid var(--yellow);
+    color: var(--yellow);
+    border-radius: var(--radius-sm);
+    padding: 0.45rem 0.6rem;
+    font-size: 0.78rem;
+    font-weight: 600;
+    text-align: center;
+    line-height: 1.35;
+}
+
 .ride-main { flex-shrink: 0; display: flex; flex-direction: column; gap: 0.4rem; }
 
 .metric { display: flex; align-items: baseline; justify-content: center; gap: 0.35rem; }
@@ -504,7 +521,7 @@ body.demo-active #view-ride   { padding-bottom: calc(2.6rem + var(--safe-b)); }
     }
     .ride-head    { grid-area: head; }
     .progress-track { grid-area: head; align-self: end; margin: 0 0 -0.3rem; }
-    .ride-alert   { grid-area: alert; }
+    .ride-alert, .ride-lockwarn { grid-area: alert; }
     .ride-main    { grid-area: main; justify-content: center; }
     .chart-wrap.chart-ride { grid-area: chart; min-height: 100px; }
     .ride-strip   { grid-area: strip; }

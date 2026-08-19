@@ -126,7 +126,11 @@ class Zone2App {
         this.lock.init();
         this.lock.onChange = (active, reason) => {
             this.$('rdot-lock').classList.toggle('connected', active);
-            if (!active && reason && this.session.isRunning) this._toast(reason, 'warn');
+            this._renderLockWarning();
+            if (!active && this.session.isRunning) {
+                if (reason) this._toast(reason, 'warn');
+                this.audio.announce('warn', 'Achtung, Bildschirm bleibt nicht an');
+            }
         };
 
         const storageOk = await this.storage.isAvailable();
@@ -1149,6 +1153,7 @@ class Zone2App {
         this.$('view-setup').classList.remove('hidden');
         this._setFormEnabled(true);
         this._alert(null);
+        this.$('ride-lockwarn')?.classList.add('hidden');
     }
 
     _setFormEnabled(enabled) {
@@ -1209,6 +1214,29 @@ class Zone2App {
         }
 
         this.$('ride-event').textContent = this._eventText;
+        this._renderLockWarning();
+    }
+
+    /**
+     * Dauerhafter Hinweis, wenn der Bildschirm nicht wachgehalten wird.
+     *
+     * Das ist die wichtigste Warnung der ganzen Anwendung. Geht der Bildschirm
+     * aus, wandert die Seite in den Hintergrund und Android beendet sie bei
+     * Speicherdruck - der Nutzer sieht dann nur, dass die App "einfach zu
+     * war". Dagegen laeuft in der App selbst kein Code mehr, es gibt also
+     * auch keine Fehlermeldung. Deshalb muss der Hinweis vorher kommen und
+     * stehen bleiben, nicht kurz aufblitzen.
+     */
+    _renderLockWarning() {
+        const el = this.$('ride-lockwarn');
+        if (!el) return;
+
+        if (this.lock.isActive) { el.classList.add('hidden'); return; }
+
+        el.textContent = ScreenLock.isSupported()
+            ? 'Bildschirm wird nicht wachgehalten. Energiesparmodus aus, Bildschirm-Zeitsperre hoch – sonst beendet Android die App.'
+            : 'Dieser Browser kann den Bildschirm nicht wachhalten. Bildschirm-Zeitsperre am Gerät hochsetzen.';
+        el.classList.remove('hidden');
     }
 
     _renderTarget() {
