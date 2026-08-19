@@ -212,14 +212,81 @@ export function buildFitFile(records, laps, sessionStart, sessionEnd, avgHR, avg
     return result;
 }
 
-/** FIT-Datei herunterladen */
+/** Standardname aus dem Startzeitpunkt */
+export function fitFilename(date = new Date()) {
+    const p = (n) => String(n).padStart(2, '0');
+    return `zone2-${date.getFullYear()}-${p(date.getMonth() + 1)}-${p(date.getDate())}`
+         + `_${p(date.getHours())}${p(date.getMinutes())}.fit`;
+}
+
+/**
+ * FIT-Datei herunterladen.
+ *
+ * Der Anker muss im Dokument hängen, sonst ignorieren manche Android-Browser
+ * den Klick. Und die Objekt-URL darf erst später freigegeben werden – wird sie
+ * direkt nach click() zurückgenommen, bricht der Download ab, bevor er begonnen
+ * hat.
+ */
 export function downloadFit(fitBytes, filename = null) {
-    const name = filename ?? `zone2-${new Date().toISOString().slice(0, 16).replace('T', '_')}.fit`;
+    const name = filename ?? fitFilename();
     const blob = new Blob([fitBytes], { type: 'application/octet-stream' });
     const url  = URL.createObjectURL(blob);
     const a    = document.createElement('a');
-    a.href     = url;
-    a.download = name;
+    a.href          = url;
+    a.download      = name;
+    a.style.display = 'none';
+    document.body.appendChild(a);
     a.click();
-    URL.revokeObjectURL(url);
+    setTimeout(() => {
+        try { document.body.removeChild(a); } catch { /* egal */ }
+        URL.revokeObjectURL(url);
+    }, 30_000);
+    return name;
+}
+
+/** Kann das Gerät Dateien über den Teilen-Dialog weitergeben? */
+export function canShareFit() {
+    if (typeof navigator === 'undefined' || !navigator.share || !navigator.canShare) return false;
+    try {
+        const probe = new File([new Uint8Array([0])], 'p.fit', { type: 'application/octet-stream' });
+        return navigator.canShare({ files: [probe] });
+    } catch {
+        return false;
+    }
+}
+
+/**
+ * FIT-Datei über den Teilen-Dialog weitergeben (Strava, intervals.icu, Drive, Mail).
+ * @returns {Promise<'geteilt'|'abgebrochen'|'nicht-moeglich'>}
+ */
+export async function shareFit(fitBytes, filename = null, title = 'Zone2 Training') {
+    if (!canShareFit()) return 'nicht-moeglich';
+    const name = filename ?? fitFilename();
+    try {
+        const file = new File([fitBytes], name, { type: 'application/octet-stream' });
+        await navigator.share({ files: [file], title, text: title });
+        return 'geteilt';
+    } catch (err) {
+        // AbortError heißt schlicht: Nutzer hat den Dialog geschlossen
+        if (err?.name === 'AbortError') return 'abgebrochen';
+        return 'nicht-moeglich';
+    }
+}
+
+/** Interne Messpunkte in das von buildFitFile erwartete Format bringen */
+export function recordsToFit(records) {
+    return (records ?? [])
+        .filter((r) => r.hr > 0 || r.w > 0)
+        .map((r) => ({ timestamp: new Date(r.t), hr: r.hr, watts: r.w }));
+}
+
+/** Laps werden intern als Zahlen geführt, der Export erwartet Date-Objekte */
+export function lapsToFit(laps) {
+    return (laps ?? [])
+        .filter((l) => l.endTime > l.startTime)
+        .map((l) => ({
+            startTime: new Date(l.startTime),
+            endTime:   new Date(l.endTime),
+            name:      l.name,
+        }));
 }

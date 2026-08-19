@@ -1,125 +1,77 @@
 /**
- * Polar H10 – Web Bluetooth Verbindung
- * Heart Rate Service (0x180D), Characteristic 0x2A37
+ * Polar H10 – Heart Rate Service (0x180D), Characteristic 0x2A37
+ *
+ * Liefert Herzfrequenz und, wenn das Gerät sie sendet, die RR-Intervalle. Aus
+ * den RR-Intervallen lässt sich die Herzfrequenz spürbar schneller ableiten als
+ * aus dem geglätteten Wert, den der Gurt selbst schickt.
  */
+
+import { BleDevice } from './ble_base.js';
 
 const HR_SERVICE_UUID        = 0x180d;
 const HR_CHARACTERISTIC_UUID = 0x2a37;
 
-export class H10Bluetooth {
+export class H10Bluetooth extends BleDevice {
     constructor() {
-        this.device = null;
-        this.server = null;
-        this.hrCharacteristic = null;
-        this.isConnected = false;
-        this._reconnectTimer = null;
-        this._stopReconnect = false;
+        super({
+            key:      'h10',
+            label:    'Polar H10',
+            filters:  [{ namePrefix: 'Polar' }, { services: [HR_SERVICE_UUID] }],
+            services: [HR_SERVICE_UUID],
+        });
 
-        this.onHeartRate   = null;  // (bpm: number) => void
-        this.onRRInterval  = null;  // (rrMs: number) => void
-        this.onConnect     = null;  // () => void
-        this.onDisconnect  = null;  // () => void
-        this.onError       = null;  // (msg: string) => void
-        this.onStatus      = null;  // (msg: string) => void
+        this.onHeartRate  = null;   // (bpm) => void
+        this.onRRInterval = null;   // (rrMs) => void
+        this.onContactLost = null;  // () => void – Gurt hat keinen Hautkontakt
+
+        this._contactOk = true;
     }
 
-    static isAvailable() {
-        return typeof navigator !== 'undefined' && !!navigator.bluetooth;
-    }
-
-    async connect() {
-        if (!H10Bluetooth.isAvailable()) {
-            this._error('Web Bluetooth wird nicht unterstützt. Bitte Chrome verwenden.');
-            return false;
-        }
-        this._stopReconnect = false;
-        try {
-            this._status('Suche Polar H10...');
-            this.device = await navigator.bluetooth.requestDevice({
-                filters: [{ namePrefix: 'Polar' }],
-                optionalServices: [HR_SERVICE_UUID],
-            });
-            this.device.addEventListener('gattserverdisconnected', () => this._onDisconnected());
-            await this._connectGatt();
-            return true;
-        } catch (err) {
-            if (err.name === 'NotFoundError') {
-                this._error('Kein Gerät ausgewählt.');
-            } else {
-                this._error(`H10 Verbindungsfehler: ${err.message}`);
-            }
-            return false;
-        }
-    }
-
-    async _connectGatt() {
-        this._status('Verbinde H10...');
-        this.server = await this.device.gatt.connect();
-        const service = await this.server.getPrimaryService(HR_SERVICE_UUID);
-        this.hrCharacteristic = await service.getCharacteristic(HR_CHARACTERISTIC_UUID);
-        this.hrCharacteristic.addEventListener('characteristicvaluechanged', (e) =>
-            this._parseHR(e.target.value)
-        );
-        await this.hrCharacteristic.startNotifications();
-        this.isConnected = true;
-        this._status('H10 verbunden');
-        if (this.onConnect) this.onConnect();
+    async _setupServices(server) {
+        const service = await server.getPrimaryService(HR_SERVICE_UUID);
+        const char    = await service.getCharacteristic(HR_CHARACTERISTIC_UUID);
+        // Der Zuhörer hängt an einem bei jedem Verbinden neu geholten Objekt,
+        // sammelt sich also nicht an.
+        char.addEventListener('characteristicvaluechanged', (e) => this._parseHR(e.target.value));
+        await char.startNotifications();
     }
 
     _parseHR(data) {
-        const flags = data.getUint8(0);
+        if (!data || data.byteLength < 2) return;
+        this._markData();
+
+        const flags     = data.getUint8(0);
         const hr16bit   = flags & 0x01;
+        const contactSupported = (flags >> 2) & 0x01;
+        const contactDetected  = (flags >> 1) & 0x01;
         const energyExp = (flags >> 3) & 0x01;
         const rrPresent = (flags >> 4) & 0x01;
 
         let offset = 1;
+        if (offset + (hr16bit ? 2 : 1) > data.byteLength) return;
         const hr = hr16bit ? data.getUint16(offset, true) : data.getUint8(offset);
         offset += hr16bit ? 2 : 1;
 
-        if (this.onHeartRate) this.onHeartRate(hr);
+        // Hautkontakt: nur melden, wenn der Gurt die Information überhaupt liefert
+        if (contactSupported) {
+            const ok = !!contactDetected;
+            if (this._contactOk && !ok && this.onContactLost) this.onContactLost();
+            this._contactOk = ok;
+        }
+
+        // Ein Wert von 0 heißt "noch kein Messwert", nicht "Herzstillstand"
+        if (hr > 0 && this.onHeartRate) this.onHeartRate(hr);
+
         if (energyExp) offset += 2;
 
         if (rrPresent) {
             while (offset + 1 < data.byteLength) {
                 const rrRaw = data.getUint16(offset, true);
                 offset += 2;
+                // RR kommt in 1/1024 s
                 const rrMs = Math.round(rrRaw * (1000 / 1024));
                 if (this.onRRInterval) this.onRRInterval(rrMs);
             }
         }
     }
-
-    async _onDisconnected() {
-        this.isConnected = false;
-        this._status('H10 getrennt');
-        if (this.onDisconnect) this.onDisconnect();
-        if (!this._stopReconnect) {
-            this._scheduleReconnect();
-        }
-    }
-
-    _scheduleReconnect() {
-        clearTimeout(this._reconnectTimer);
-        this._reconnectTimer = setTimeout(async () => {
-            if (this._stopReconnect || !this.device) return;
-            this._status('H10 Reconnect...');
-            try {
-                await this._connectGatt();
-            } catch {
-                this._scheduleReconnect();
-            }
-        }, 5000);
-    }
-
-    disconnect() {
-        this._stopReconnect = true;
-        clearTimeout(this._reconnectTimer);
-        if (this.device?.gatt?.connected) {
-            this.device.gatt.disconnect();
-        }
-        this.isConnected = false;
-    }
-
-    _status(msg) { if (this.onStatus) this.onStatus(msg); }
-    _error(msg)  { if (this.onError)  this.onError(msg);  }
 }
