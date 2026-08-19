@@ -157,17 +157,24 @@ export class Storage {
 
     // ── Messpunkte ────────────────────────────────────────────────────────────
 
-    /** Stapel von Messpunkten anhängen – eine Transaktion für alle */
+    /**
+     * Stapel von Messpunkten anhängen – eine Transaktion für alle.
+     * @returns {Promise<boolean>} ob der Stapel wirklich geschrieben wurde.
+     *   Der Aufrufer kann ihn sonst aufheben und später erneut versuchen.
+     */
     async appendRecords(sid, records) {
-        if (!records || !records.length) return;
+        if (!records || !records.length) return true;
         try {
-            await this._run(STORE_RECORDS, 'readwrite', (os) => {
-                for (const r of records) {
-                    os.put({ sid, t: r.t, hr: r.hr, w: r.w, tw: r.tw, cad: r.cad, ph: r.ph });
+            const r = await this._run(STORE_RECORDS, 'readwrite', (os) => {
+                for (const rec of records) {
+                    os.put({ sid, t: rec.t, hr: rec.hr, w: rec.w, tw: rec.tw, cad: rec.cad, ph: rec.ph });
                 }
                 return null;
             });
-        } catch { /* Rohdatenverlust ist verschmerzbar, die App läuft weiter */ }
+            return !r.noDb;
+        } catch {
+            return false;
+        }
     }
 
     async getRecords(sid) {

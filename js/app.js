@@ -93,6 +93,9 @@ class Zone2App {
         this._loop       = null;
         this._lastSnapshot = 0;
         this._lastFlush    = 0;
+        this._snapshotInFlight = false;
+        this._flushInFlight    = false;
+        this._recordBacklog    = [];
         this._lastChart    = 0;
         this._lastDriftCalc = 0;
         this._lastErgRefresh = 0;
@@ -528,6 +531,8 @@ class Zone2App {
         this.lastDrift      = null;
         this.driftResult    = null;
         this._lastSnapshot = 0; this._lastFlush = 0; this._lastChart = 0;
+        this._snapshotInFlight = false; this._flushInFlight = false;
+        this._recordBacklog = [];
         this._lastDriftCalc = 0; this._lastErgRefresh = 0;
         this._ergDeviationSince = 0;
         this.rideChart?.setData([]);
@@ -581,8 +586,11 @@ class Zone2App {
         try {
             if (!summary) { await this._discardSnapshot(); return; }
 
-            // Restliche Messpunkte sichern
-            await this.storage.appendRecords(this.session.id, this.session.drainPending());
+            // Restliche Messpunkte sichern, samt eines Stapels, dessen
+            // Schreibvorgang zuvor nicht durchgekommen war
+            const rest = this._recordBacklog.concat(this.session.drainPending());
+            this._recordBacklog = [];
+            await this.storage.appendRecords(this.session.id, rest);
 
             const meta = {
                 id:               this.session.id,
@@ -715,7 +723,7 @@ class Zone2App {
         if (now - this._lastSnapshot >= SNAPSHOT_EVERY_MS) this._saveSnapshot();
         if (now - this._lastFlush >= FLUSH_EVERY_MS) {
             this._lastFlush = now;
-            this.storage.appendRecords(this.session.id, this.session.drainPending());
+            this._flushRecords();
         }
 
         // ── Anzeige ───────────────────────────────────────────────────────
@@ -1062,12 +1070,50 @@ class Zone2App {
         await this.storage.clearSnapshot();
     }
 
+    /**
+     * Messpunkte wegschreiben.
+     *
+     * Der Stapel wird erst verworfen, wenn der Schreibvorgang bestaetigt ist.
+     * Vorher leerte der Takt den Puffer sofort - schlug das Schreiben fehl,
+     * waren die Rohdaten dieser fuenf Sekunden endgueltig weg. Die Sperre
+     * verhindert ausserdem, dass sich bei traeger Datenbank Transaktionen
+     * ueberlagern.
+     */
+    _flushRecords() {
+        if (this._flushInFlight) return;
+
+        const batch = this._recordBacklog.concat(this.session.drainPending());
+        if (!batch.length) return;
+
+        // Sollte der Speicher dauerhaft klemmen, darf der Rueckstand nicht
+        // unbegrenzt wachsen. Die aeltesten Punkte fallen dann heraus.
+        this._recordBacklog = batch.length > 5000 ? batch.slice(-5000) : batch;
+        this._flushInFlight = true;
+
+        const sid = this.session.id;
+        this.storage.appendRecords(sid, this._recordBacklog)
+            .then((ok) => { if (ok) this._recordBacklog = []; })
+            .catch(() => { /* Stapel bleibt liegen und wird erneut versucht */ })
+            .finally(() => { this._flushInFlight = false; });
+    }
+
+    /**
+     * Schnappschuss sichern.
+     *
+     * Die Sperre ist kein Schoenheitsfehler: der Aufruf kommt jede Sekunde und
+     * wartet nicht auf sein Ergebnis. Wird IndexedDB traege - volle Datenbank,
+     * Speicherdruck, langsamer Flash - stapeln sich sonst ueber eine Stunde
+     * hinweg Schreibvorgaenge samt ihrer Nutzlast im Speicher. Genau diese
+     * Sorte Fehler faellt erst nach mehreren Einheiten auf.
+     */
     _saveSnapshot(force = false) {
         const now = Date.now();
         if (!force && now - this._lastSnapshot < SNAPSHOT_EVERY_MS) return;
         this._lastSnapshot = now;
         if (!this.session.isRunning) return;
+        if (this._snapshotInFlight) return;
 
+        this._snapshotInFlight = true;
         this.storage.saveSnapshot({
             version:        1,
             savedAt:        now,
@@ -1080,7 +1126,7 @@ class Zone2App {
             lastDrift:      this.lastDrift,
             driftAborted:   this.driftAborted,
             driftWorkStart: this.drift.workBlockStart,
-        }).catch(() => {});
+        }).catch(() => {}).finally(() => { this._snapshotInFlight = false; });
     }
 
     // ══════════════════════════════════════════════════════════════════════
